@@ -1,6 +1,8 @@
 # SF2 Gaussian reference toolbox
 
-MATLAB R2016b or newer; no additional toolboxes. Add this directory to your MATLAB path, then run `demo_sf2` or `test_sf2`.
+MATLAB R2016b or newer; no additional toolboxes. 
+
+Add this directory to your MATLAB path, then run `demo_sf2`.
 
 ```matlab
 model = struct('type', 'exp', 'ell', 20);
@@ -34,7 +36,7 @@ For N observations and J retained integer lags, complete-record covariance evalu
 
 Regularity is checked within a tolerance of `1e-8*spacing + 8*eps(max(abs(x)))`; accepted coordinate roundoff is treated as an exact grid with spacing set by the endpoints. In contrast, the arbitrary-geometry function uses actual pair distances, which can place nominally edge-adjacent lags in different bins due to coordinate roundoff. Avoid placing bin edges exactly on integer lags when comparing floating-point coordinate grids; half-lag boundaries are convenient for single-lag bins.
 
-Run `demo_sf2_1D` for a 2000-point exponential-covariance example and `test_sf2_1D` for comparisons with the full function. The demo uses a stationary AR(1) recursion to generate the sampled exponential covariance without a dense Cholesky factorization.
+Run `demo_sf2_1D` for a 2000-point exponential-covariance example. The demo uses a stationary AR(1) recursion to generate the sampled exponential covariance without a dense Cholesky factorization.
 
 ## Shape parameters only
 
@@ -156,8 +158,3 @@ Scheck = sf2_estimate(xy, X, edges, model, ...
 
 For `Method = 'pairs'`, temporary covariance memory scales as `BlockSize^2`, and runtime remains O(M^2). `BlockSize` is unused by the default graph method. No thinning or covariance truncation occurs in either method. `CrossCovariance = false` returns NaN off-diagonal entries; the graph method then skips cross-bin products and traces.
 
-## Validation
-
-`test_sf2` checks both exact algorithms for all three models against an independent incidence-matrix calculation, Monte Carlo population means and covariance, changes of cache capacity, block size, and data amplitude, power-law coordinate-unit invariance, missing observations, empty bins, the single-pair identity, chi-squared quantiles and confidence-level ordering, interval scaling, numeric input classes, missing-data index mapping, unequal bins and edge inclusion, tiny shape amplitudes, and Monte Carlo coverage in the exact single-pair case. Neither MATLAB nor Octave was available in the authoring environment, so these MATLAB tests remain unrun. Independent Python numerical checks validate the covariance algebra and normalization, but do not establish MATLAB runtime correctness.
-
-Reference: Isserlis, L. (1918), On a formula for the product-moment coefficient of any order of a normal frequency distribution in any number of variables, Biometrika, 12, 134–139. https://doi.org/10.1093/biomet/12.1-2.134
