@@ -2,13 +2,16 @@ function out = sf2_estimate(xy, X, edges, model, varargin)
 %SF2_ESTIMATE SF2 and Gaussian reference uncertainty for arbitrary 2D samples.
 %
 %   S = sf2_estimate(xy, X, edges, model)
-%   S = sf2_estimate(..., 'Method', 'graph', 'CrossCovariance', true)
+%   S = sf2_estimate(..., 'Method', 'trace', 'CrossCovariance', true)
+%   S = sf2_estimate(..., 'Pairs', sf2_pairs(xy, edges))
+%   S = sf2_estimate(xy, X, [], model, 'Pairs', pp)
 %
 % Inputs
 %   xy      Planar coordinates x + 1i*y, in any consistent distance units.
 %   X       Real scalar observations. NaNs are omitted pairwise.
-%   edges   Separation-bin edges. All unordered pairs within bins are used,
-%           with equal weights. The final bin includes its upper edge.
+%   edges   Separation-bin edges. By default all unordered pairs within bins
+%           are used, with equal weights. The final upper edge is included.
+%           Use [] with supplied Pairs to infer bins from their labels.
 %   model   Shape parameters only:
 %             struct('type', 'exp',        'ell', ell)
 %             struct('type', 'gaussian',   'ell', ell)
@@ -17,10 +20,19 @@ function out = sf2_estimate(xy, X, edges, model, varargin)
 %           fractional covariance. The power-law range is 0 < zeta < 2.
 %
 % Options
-%   Method           'graph' (default): Appendix B trace formulation.
-%                    'pairs': direct pair-block sum for verification.
-%   BlockSize        Pair-block size for Method = 'pairs' (default 512).
-%                    Not used by Method = 'graph'.
+%   Pairs            Optional M-by-3 [i, j, bin] array from sf2_pairs(xy,
+%                    edges), using original observation indices and i < j.
+%                    Skips pair enumeration; subsets and reordered rows are
+%                    allowed. Duplicate pairs and inconsistent bin labels
+%                    are rejected when edges are provided. Without edges,
+%                    labels define bins and only their validity is checked.
+%                    Duplicate pairs are always rejected. NaN pairs are omitted.
+%                    Explicit [] or zeros(0,3) means no pairs, not automatic
+%                    enumeration. Omit this option for automatic enumeration.
+%   Method           'trace' (default): Appendix B trace formulation.
+%                    'direct': direct pair-block sum for verification.
+%   BlockSize        Pair-block size for Method = 'direct' (default 512).
+%                    Not used by Method = 'trace'.
 %   CacheMB          Budget for cached graph products, in MiB (default 256).
 %                    Additional working matrices are required; see README.
 %   ConfidenceLevel  Pointwise chi-squared CI coverage (default 0.95).
@@ -33,7 +45,10 @@ function out = sf2_estimate(xy, X, edges, model, varargin)
 %                       after omitting pairs with missing observations.
 %                       NaN for empty bins. Prefer this plotting coordinate
 %                       to nominal bin centers for irregular sampling.
-%   edges               Input bin edges, describing the full bin extent.
+%   edges               Input bin edges, describing the full bin extent;
+%                       empty when edges were omitted. Without edges, bin
+%                       count is max(pp(:,3)) before NaN filtering; trailing
+%                       empty bins cannot be inferred. Empty pp gives no bins.
 %   fractionalCovariance Gaussian reference covariance divided by the
 %                       product of model bin means; amplitude independent.
 %   relativeVariance    Diagonal of fractionalCovariance.
@@ -68,23 +83,30 @@ X = full(double(X(:)));
 if numel(X) ~= numel(xy) || any(isinf(X))
     error('X must match xy and contain finite values or NaNs.');
 end
-validateattributes(edges, {'numeric'}, ...
-    {'vector', 'real', 'nonnegative', 'finite'});
+validateattributes(edges, {'numeric'}, {'2d', 'real', 'nonnegative', 'finite'});
+hasEdges = ~isempty(edges);
+if hasEdges
+    validateattributes(edges, {'numeric'}, {'vector'});
+end
 edges = full(double(edges(:)));
-nb = numel(edges) - 1;
-if nb < 1 || any(diff(edges) <= 0)
-    error('Edges must increase.');
+nb = 0;
+if hasEdges
+    nb = numel(edges) - 1;
+    if nb < 1 || any(diff(edges) <= 0)
+        error('Edges must increase.');
+    end
 end
 
 ip = inputParser;
-addParameter(ip, 'Method', 'graph');
+addParameter(ip, 'Pairs', []);
+addParameter(ip, 'Method', 'trace');
 addParameter(ip, 'BlockSize', 512);
 addParameter(ip, 'CacheMB', 256);
 addParameter(ip, 'ConfidenceLevel', 0.95);
 addParameter(ip, 'CrossCovariance', true);
 parse(ip, varargin{:});
 options = ip.Results;
-method = validatestring(options.Method, {'graph', 'pairs'});
+method = validatestring(options.Method, {'trace', 'direct'});
 validateattributes(options.BlockSize, {'numeric'}, ...
     {'scalar', 'integer', 'positive', 'finite'});
 validateattributes(options.CrossCovariance, {'logical'}, {'scalar'});
@@ -97,19 +119,77 @@ options.CacheMB = double(options.CacheMB);
 options.ConfidenceLevel = double(options.ConfidenceLevel);
 sf2_model(0, model); % Validate the model even when no pairs are retained.
 
-%% Enumerate pairs and calculate the observed and model-shape bin means.
-% Exclude missing observations before enumeration, avoiding unused pairs.
-% Map endpoint indices back to the original vector for diagnostic outputs.
-originalIndex = find(~isnan(X));
-if numel(originalIndex) < 2
-    pp = zeros(0, 3);
-else
-    pp = sf2_pairs(xy(originalIndex), edges);
+%% Obtain pairs and calculate the observed and model-shape bin means.
+validX = ~isnan(X);
+originalIndex = find(validX);
+usePairs = ~any(strcmp(ip.UsingDefaults, 'Pairs'));
+if ~hasEdges && ~usePairs
+    error('sf2_estimate:MissingEdges', ...
+        'Nonempty edges are required unless the Pairs option is supplied.');
 end
-ij = reshape(originalIndex(pp(:, 1:2)), size(pp, 1), 2);
-bin = pp(:, 3);
-clear pp
-separation = abs(xy(ij(:, 2)) - xy(ij(:, 1)));
+if usePairs
+    % Supplied indices refer to the original observation vector, never to
+    % the reduced vector obtained by removing NaNs.
+    pp = options.Pairs;
+    validateattributes(pp, {'numeric'}, {'2d', 'real', 'finite', 'integer'});
+    if isequal(size(pp), [0, 0])
+        pp = zeros(0, 3);
+    end
+    if size(pp, 2) ~= 3
+        error('sf2_estimate:InvalidPairs', ...
+            'Pairs must have three columns: [i, j, bin].');
+    end
+    pp = full(double(pp));
+    if ~hasEdges && ~isempty(pp)
+        % Infer the bin count before omitting NaN pairs so bin labels and
+        % output dimensions remain consistent when the data mask changes.
+        nb = max(pp(:, 3));
+    end
+    if any(pp(:, 1) < 1 | pp(:, 2) > numel(X) | pp(:, 1) >= pp(:, 2)) ...
+            || any(pp(:, 3) < 1 | pp(:, 3) > nb)
+        error('sf2_estimate:InvalidPairs', ...
+            'Pairs require 1 <= i < j <= numel(X) and 1 <= bin <= number of bins.');
+    end
+    if size(unique(pp(:, 1:2), 'rows'), 1) ~= size(pp, 1)
+        error('sf2_estimate:DuplicatePairs', ...
+            'Each unordered observation pair may occur only once.');
+    end
+    separation = abs(xy(pp(:, 2)) - xy(pp(:, 1)));
+    if hasEdges
+        actualBin = discretize(separation, edges);
+        if any(isnan(actualBin) | actualBin ~= pp(:, 3))
+            error('sf2_estimate:InconsistentPairs', ...
+                'Supplied bin labels do not match xy and edges. Regenerate pp with sf2_pairs.');
+        end
+    end
+    % Filter the row-aligned pair table before splitting it into arrays.
+    % Reuse the observation-validity vector, avoiding an M-by-2 data array.
+    % Validate and infer bin count first so missing data cannot hide invalid
+    % input or remove trailing bins. Avoid copying when all pairs are valid.
+    keep = validX(pp(:, 1)) & validX(pp(:, 2));
+    if ~all(keep)
+        pp = pp(keep, :);
+        separation = separation(keep);
+    end
+    ij = pp(:, 1:2);
+    bin = pp(:, 3);
+    clear keep actualBin
+else
+    % Exclude missing observations before enumeration, avoiding unused pairs.
+    % Map endpoint indices back to the original vector for diagnostic output.
+    if numel(originalIndex) < 2
+        pp = zeros(0, 3);
+    else
+        pp = sf2_pairs(xy(originalIndex), edges);
+    end
+    ij = reshape(originalIndex(pp(:, 1:2)), size(pp, 1), 2);
+    bin = pp(:, 3);
+    separation = abs(xy(ij(:, 2)) - xy(ij(:, 1)));
+end
+clear pp validX
+% Release the supplied array reference before dense covariance calculations.
+options = rmfield(options, 'Pairs');
+clear ip varargin
 incrementSquared = (X(ij(:, 2)) - X(ij(:, 1))).^2;
 
 if isempty(bin)
@@ -138,13 +218,13 @@ end
 clear separation incrementSquared
 
 %% Evaluate the covariance using either exact formulation.
-% The graph method is Appendix B extended to finite bins and cross-bin
-% covariance. The pair method independently evaluates the original sum.
-if strcmp(method, 'graph')
-    shapeCovariance = graph_covariance(xy, ij, bin, count, model, ...
+% The trace method is Appendix B extended to finite bins and cross-bin
+% covariance. The direct method independently evaluates the original sum.
+if strcmp(method, 'trace')
+    shapeCovariance = trace_covariance(xy, ij, bin, count, model, ...
         options.CrossCovariance, options.CacheMB, shapeScale);
 else
-    shapeCovariance = pair_covariance(xy, ij, bin, count, model, options, shapeScale);
+    shapeCovariance = direct_covariance(xy, ij, bin, count, model, options, shapeScale);
 end
 
 %% Remove model amplitude and convert to plug-in absolute uncertainty.
@@ -208,8 +288,8 @@ out = struct('edges', edges, 'r', r, 'D2', D2, 'D2shape', D2shape, ...
     'count', count, 'pairs', ij, 'pairBin', bin, 'model', model, 'method', method);
 end
 
-function V = graph_covariance(xy, ij, bin, count, model, crossCovariance, cacheMB, shapeScale)
-%GRAPH_COVARIANCE Observation-level trace calculation from Appendix B.
+function V = trace_covariance(xy, ij, bin, count, model, crossCovariance, cacheMB, shapeScale)
+%TRACE_COVARIANCE Observation-level trace calculation from Appendix B.
 % For each bin a, L_a = B_a' * B_a / N_a is its normalized Laplacian.
 % With S(i,j) = f(distance(i,j))/shapeScale,
 % V(a,b) = trace(S * L_a * S * L_b) / 2.
@@ -296,8 +376,8 @@ for first = 1:cacheCount:numel(active)
 end
 end
 
-function V = pair_covariance(xy, ij, bin, count, model, options, shapeScale)
-%PAIR_COVARIANCE Direct Gaussian covariance sum, retained for verification.
+function V = direct_covariance(xy, ij, bin, count, model, options, shapeScale)
+%DIRECT_COVARIANCE Direct Gaussian covariance sum, retained for verification.
 % Cov(delta_u^2, delta_v^2) = 2*G_uv^2. All four endpoint distances enter
 % G_uv, including distances outside the SF bins. Blocks limit memory only.
 nb = numel(count);

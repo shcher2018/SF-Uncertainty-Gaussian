@@ -9,9 +9,9 @@ sigma2True = 1;
 % Initialize from its stationary distribution; no spinup or dense Cholesky.
 phi = exp(-(x(2) - x(1)) / model.ell);
 innovationSD = sqrt(sigma2True * (-expm1(2 * log(phi))));
-X = zeros(n, 1);
+X = zeros(N, 1);
 X(1) = sqrt(sigma2True) * randn;
-for j = 2:n
+for j = 2:N
     X(j) = phi * X(j - 1) + innovationSD * randn;
 end
 

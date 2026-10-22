@@ -5,8 +5,9 @@ function pairs = sf2_pairs(xy, edges)
 %   Coordinates are planar x + 1i*y. Bins are left-closed/right-open,
 %   except that the final bin includes its upper edge.
 %   Coincident observations are included when zero is within a bin.
-%   This helper is used internally by sf2_estimate; pairs cannot currently
-%   be supplied to the estimator as an option.
+%   Reuse the output with sf2_estimate(..., 'Pairs', pairs).
+%   Pair indices refer to the original coordinate vector, including any
+%   observations whose data values may subsequently be omitted as NaNs.
 
 validateattributes(xy, {'numeric'}, {'vector', 'finite', 'nonempty'});
 validateattributes(edges, {'numeric'}, ...

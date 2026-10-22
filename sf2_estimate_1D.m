@@ -25,7 +25,7 @@ function out = sf2_estimate_1D(x, X, edges, model, varargin)
 %   ReturnPairs      Materialize diagnostic pairs/pairBin (default false).
 %                    Otherwise these fields are empty, avoiding O(N*J)
 %                    pair storage. Pair ordering may differ from sf2_estimate.
-%   The graph-specific Method, CacheMB, and BlockSize options are not used.
+%   The trace-specific Method, CacheMB, and BlockSize options are not used.
 %
 % Additional outputs: spacing, lags, lagBin, and lagCount describe the grid
 % and contributing integer lags. method is 'regular'.
