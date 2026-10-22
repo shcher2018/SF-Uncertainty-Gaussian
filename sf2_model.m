@@ -8,11 +8,10 @@ function shape = sf2_model(h, model)
 %   power:      shape(h) = h^zeta, with 0 < zeta < 2
 %
 % The finite-scale shapes use unit field variance for normalization. The
-% power-law normalization depends on the coordinate units. Neither is a
-% prediction of absolute SF2; all common multiplicative factors cancel
-% from the fractional covariance returned by sf2_estimate.
+% power-law normalization depends on the coordinate units. Common
+% multiplicative factors cancel from fractional covariance.
 % 'scale-free' and 'scalefree' remain aliases for 'power'.
-% Only type, ell, and zeta are read. No sigma2, D0, or r0 is required.
+% Model parameters are type, ell, and zeta.
 
 validateattributes(h, {'numeric'}, {'real', 'nonnegative', 'finite'});
 h = full(double(h));

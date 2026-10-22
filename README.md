@@ -1,18 +1,49 @@
 # SF2 Gaussian reference toolbox
 
-MATLAB R2016b or newer; no additional toolboxes. Add this directory to your MATLAB path, then run `demo_sf2` or `test_sf2`.
+MATLAB R2016b or newer; no additional toolboxes. Add this directory to your MATLAB path, then run `demo_sf2`.
 
 ```matlab
 model = struct('type', 'exp', 'ell', 20);
 S = sf2_estimate(xy, X, 0:5:100, model);
 ```
 
-`xy = x + 1i*y` contains planar coordinates, not longitude/latitude. Distance units must match `ell` and bin edges. `X` is a real scalar field. All unordered pairs within the bins receive equal weights. Observations with NaN values are removed before pair enumeration, preserving original endpoint indices in the outputs; coordinates must be finite. Explicit weighting is not supported. Pre-binned pair lists can be supplied as described below.
+`xy = x + 1i*y` contains planar coordinates, not longitude/latitude. Distance units must match `ell` and bin edges. `X` is a real scalar field. All unordered pairs within the bins receive equal weights. Observations with NaN values are removed before pair enumeration, using original endpoint indices in supplied pair cells; coordinates must be finite. Explicit weighting is not supported. Pre-binned pair lists can be supplied as described below.
+
+## Independent bin intervals
+
+The `edges` argument accepts either the original increasing edge vector or an m-by-2 array, with one `[lower, upper]` interval per row:
+
+```matlab
+edges = [1, 2; 3, 8; 5, 10];
+pp = sf2_pairs(xy, edges);
+S = sf2_estimate(xy, X, edges, model);
+S1 = sf2_estimate_1D(x, X, edges, model);
+```
+
+Interval rows may have unequal widths, gaps, overlaps, arbitrary order, or even identical bounds. Row number is the bin label. A vector always denotes adjacent bins; a 1-by-2 row vector therefore describes a single bin under either interpretation. `S.edges` preserves a genuine m-by-2 interval array; edge vectors are returned as columns.
+
+All lower bounds are included. Upper bounds are excluded **except the globally largest upper bound**, which is included in every interval ending there. This convention is independent of row order and reproduces the original edge-vector behavior when adjacent intervals are supplied. Bounds must be finite and nonnegative, with lower < upper in every interval.
+
+A pair in overlapping bins contributes once to each bin. The same `[i,j]` may appear in several bin cells, but duplicate rows within a cell are rejected. Cross-bin covariance accounts for the shared increments exactly under Gaussian closure. Identical bins yield identical SF2 estimates and fully correlated errors; their covariance matrix is singular. Counts measure pair-bin memberships, so summing bin counts can exceed the number of unique pairs.
+
+The same rules apply to supplied `Pairs` and regular 1D sampling. Supplied memberships may be a subset of all eligible memberships. Mean separation and model-shape averages are calculated separately from each bin's retained pairs. Empty bins return NaNs as before.
+
+Independent-interval assignment loops over bins, rather than using `discretize`. Overlap increases pair-bin storage and covariance work. The edge-vector path retains `discretize` for efficient disjoint assignment. In the regular 1D function, `lags`, `lagBin`, and `lagCount` describe lag-bin memberships; a physical lag can occur multiple times when intervals overlap.
+
+Both general and regular-1D edge-vector paths use `discretize`. Independent intervals use membership comparisons because one separation may belong to several bins.
+
+To validate bins and inspect their normalized representation without pair enumeration:
+
+```matlab
+[~, binInfo] = sf2_pairs([], edges);
+```
+
+`binInfo` contains `edges`, `limits`, `includeUpper`, and `vectorEdges`.
 
 ## Reuse pre-binned pairs
 
 ```matlab
-pp = sf2_pairs(xy, edges); % M-by-3 rows [i, j, bin].
+pp = sf2_pairs(xy, edges); % One cell per bin; pp{b} contains [i,j] rows.
 S = sf2_estimate(xy, X, edges, model, 'Pairs', pp);
 ```
 
@@ -22,15 +53,21 @@ Edges may be omitted when supplying pairs:
 S = sf2_estimate(xy, X, [], model, 'Pairs', pp);
 ```
 
-In this case labels in `pp(:,3)` define the bins, `S.edges` is empty, and the number of bins is `max(pp(:,3))`, determined before NaN-pair filtering. Missing label numbers yield empty bins; trailing empty bins cannot be inferred. Empty supplied pairs with empty edges produce zero bins. Mean separations are still calculated from actual retained pairs. Bin assignments cannot be checked against edges when no edges are provided; supplied labels need not correspond to contiguous separation intervals. If edges are supplied, the existing consistency check remains active.
+`pp` is a column cell array: `pp{b}` is an M_b-by-2 index matrix for bin b. Empty bins contain `zeros(0,2)`. Cell position supplies the bin label.
 
-Indices refer to the original coordinate/observation vectors. The function checks integer indices, `1 <= i < j <= numel(X)`, valid bin numbers, unique unordered pairs, and (when edges are supplied) consistency of bin labels with the current coordinates and edges. Pairs involving NaN observations are omitted after validation; original indices are preserved in the output. Do not renumber indices to skip missing observations.
+With empty edges, `S.edges` is empty and `numel(pp)` defines the number of bins before NaN filtering. **Trailing empty bins are preserved.** With edges supplied, the number of cells must match the number of bins. Empty cell contents may be `[]` or `zeros(0,2)` and are normalized to `zeros(0,2)`. The shorthand `'Pairs', {}` or `'Pairs', []` requests no pairs: with edges, all their bins are empty; without edges, there are zero bins.
 
-Reuse `pp` across data vectors or model shapes on the same coordinate layout. Subsets and reordered rows are allowed, defining an equally weighted estimator over exactly the supplied pairs. Explicit `[]` or `zeros(0,3)` returns an empty estimator; only omission of `Pairs` triggers automatic enumeration. The option works with both trace and direct covariance methods and does not apply to `sf2_estimate_1D`.
+Indices refer to the original coordinate/observation vectors. Each cell is checked for integer indices, `1 <= i < j <= numel(X)`, duplicate rows, and membership in its bin when edges are supplied. NaN-containing pairs are omitted within each cell after validation. Do not renumber indices to skip missing observations. Subsets and reordered rows within a cell are allowed; reordering cells changes the bin labels.
 
-This skips O(n^2) pair enumeration. Validation still computes distances for the M supplied pairs and checks uniqueness, currently O(M log M); covariance is recomputed for each call. No geometry or covariance cache persists between function calls.
+Reuse `pp` across data vectors or model shapes on the same coordinates. The `Pairs` option works with both covariance methods and does not apply to `sf2_estimate_1D`.
 
-Run `test_sf2_prebinned` to compare automatic and supplied pairs, including reordered rows, missing observations, subsets, empty arrays, and invalid-input rejection.
+The main estimator and trace backend keep pairs in cells. The trace backend builds each bin's Laplacian directly from its cell, avoiding repeated selections from a flat table. Only the direct backend flattens pairs internally for its existing block algorithm. Pair generation uses per-bin buffers with geometric capacity growth, without constructing a global three-column table. Edge vectors still use `discretize`, followed by label grouping within each enumeration chunk.
+
+This skips pair enumeration and bin assignment. Validation still computes distances for the M supplied pairs and checks uniqueness, with cost up to O(sum_b M_b log M_b); covariance is recomputed for each call. No geometry or covariance cache persists between function calls.
+
+Both estimators return SF2 and uncertainty statistics. Use `sf2_pairs` to obtain reusable pair-index cells separately.
+
+`CrossCovariance` defaults to `false` in both estimators: diagonal variances and pointwise confidence intervals are computed, and off-diagonal covariance entries are NaN. Request `'CrossCovariance', true` for the full covariance matrices.
 
 ## Regular 1D records
 
@@ -45,19 +82,17 @@ S = sf2_estimate_1D(x, X, edges, model, ...
 
 The functions return the same principal scientific fields, including `r`, `D2`, `D2shape`, `count`, `fractionalCovariance`, `covariance`, `relativeVariance`, `variance`, `stderr`, `effectiveDof`, `confidenceInterval`, and `confidenceLevel`. Model amplitudes are not required. The 1D output additionally contains `spacing`, `lags`, `lagBin`, and `lagCount`; `method` is `'regular'`.
 
-**Diagnostic difference:** `pairs` and `pairBin` are empty by default in the 1D function, to avoid potentially quadratic pair storage. Request `'ReturnPairs', true` if needed. Pair row ordering can differ; indices still refer to the original input record. Trace-specific `Method`, `CacheMB`, and `BlockSize` options do not apply to the 1D function.
-
 For integer lags p and q, and start offset h = start_q - start_p, define the shape increment covariance
 
 G_pq(h) = [f(|h-p| dx) + f(|h+q| dx) - f(|h+q-p| dx) - f(|h| dx)] / 2.
 
 The code sums 2*G_pq(h)^2 times the number of retained start pairs having that offset, divides by the bin pair counts, and accumulates all lag combinations in the bins. Both offset signs are included. Complete records use exact analytic overlap counts. Records with missing values use integer counts from zero-padded FFT correlations of valid-start masks. This is an exact finite-record sum under the same Gaussian closure, without a periodic-record assumption or covariance truncation.
 
-For N observations and J retained integer lags, complete-record covariance evaluation takes O(N J^2) time and O(N) working storage, plus lag metadata and the bin covariance output. With missing values, correlations can increase runtime to O(N J^2 log N). Wide bins or a large maximum separation may contain many lags, so the method is not universally faster than the trace backend. `'CrossCovariance', false` skips lag combinations belonging to different bins. No dense N-by-N matrices are formed. Explicit diagnostic pairs add O(N J) storage when requested.
+For N observations and J retained lag-bin memberships, complete-record covariance evaluation takes O(N J^2) time and O(N) working storage, plus lag metadata and the bin covariance output. With missing values, correlations can increase runtime to O(N J^2 log N). Wide bins or a large maximum separation may contain many lags, so the method is not universally faster than the trace backend. `'CrossCovariance', false` skips lag combinations belonging to different bins. No dense N-by-N matrices are formed.
 
 Regularity is checked within a tolerance of `1e-8*spacing + 8*eps(max(abs(x)))`; accepted coordinate roundoff is treated as an exact grid with spacing set by the endpoints. In contrast, the arbitrary-geometry function uses actual pair distances, which can place nominally edge-adjacent lags in different bins due to coordinate roundoff. Avoid placing bin edges exactly on integer lags when comparing floating-point coordinate grids; half-lag boundaries are convenient for single-lag bins.
 
-Run `demo_sf2_1D` for a 2000-point exponential-covariance example and `test_sf2_1D` for comparisons with the full function. The demo uses a stationary AR(1) recursion to generate the sampled exponential covariance without a dense Cholesky factorization.
+Run `demo_sf2_1D` for a 2000-point exponential-covariance example. The demo uses a stationary AR(1) recursion to generate the sampled exponential covariance without a dense Cholesky factorization.
 
 ## Shape parameters only
 
@@ -106,9 +141,8 @@ This is a **plug-in Gaussian reference estimate**, not a known-model variance or
 | `confidenceInterval` | Two columns: lower and upper pointwise chi-squared confidence limits |
 | `confidenceLevel` | Requested coverage, default 0.95 |
 | `count` | Number of contributing pairs |
-| `pairs`, `pairBin` | Retained pair indices and bin assignments, for diagnostics |
 
-`D2model` was replaced by `D2shape` because an absolute model prediction cannot be supplied without amplitude. Weight-related outputs were removed. All per-bin vectors are columns. Bins are left-closed/right-open, except the final upper edge is included. Empty bins have zero counts and NaN estimates and uncertainty. A bin containing only zero-separation pairs has undefined fractional covariance and therefore NaN uncertainty.
+All per-bin vectors are columns. Bins are left-closed/right-open, except the globally largest upper edge is included. Empty bins have zero counts and NaN estimates and uncertainty. A bin containing only zero-separation pairs has undefined fractional covariance and therefore NaN uncertainty.
 
 ## Approximate chi-squared confidence intervals
 
@@ -137,11 +171,11 @@ Model shape parameters are treated as specified. Parameter-fitting uncertainty, 
 
 Integer and single-precision inputs are converted to full double precision before arithmetic. Coordinates must be finite even where observations are missing.
 
-Covariance sums are internally rescaled to avoid overflow or underflow from squaring an arbitrary model amplitude. Material violations of the Gaussian fractional-variance bounds trigger warning `sf2_estimate:NumericalCovariance` and NaN uncertainties for affected bins, rather than a falsely collapsed confidence interval. The bound check does not guarantee numerical accuracy: very small increments between widely separated clusters can still suffer cancellation in four-point differences. Compare the graph and direct methods for demanding geometries; both can lose precision at extreme scale ratios.
+Covariance sums are internally rescaled to avoid overflow or underflow from squaring an arbitrary model amplitude. Material violations of the Gaussian fractional-variance bounds trigger warning `sf2_estimate:NumericalCovariance` and NaN uncertainties for affected bins, rather than a falsely collapsed confidence interval. The bound check does not guarantee numerical accuracy: very small increments between widely separated clusters can still suffer cancellation in four-point differences. Compare the trace and direct methods for demanding geometries; both can lose precision at extreme scale ratios.
 
 The finite-geometry sums use no large-domain approximation. The Gaussian closure is an assumption; conversion to absolute uncertainty is a plug-in approximation.
 
-## Computation: Appendix B graph formulation
+## Computation: Appendix B trace formulation
 
 The default algorithm uses the observation graph, with one normalized Laplacian per separation bin:
 
@@ -155,12 +189,12 @@ This is Appendix B's trace identity, extended to cross-bin covariance and normal
 
 ```matlab
 S = sf2_estimate(xy, X, edges, model); % Default: Method = 'trace'.
-S = sf2_estimate(xy, X, edges, model, 'CrossCovariance', false);
+Sfull = sf2_estimate(xy, X, edges, model, 'CrossCovariance', true);
 ```
 
-The graph calculation removes observations that contribute no retained pair from its internal matrices, while diagnostic pair indices still refer to the original data. It builds a dense n-by-n model-shape matrix and sparse Laplacians, where n is the number of participating observations.
+The trace calculation restricts its internal matrices to observations participating in retained pairs. It builds a dense n-by-n model-shape matrix and sparse Laplacians, where n is the number of participating observations.
 
-Graph products T_a = S L_a are cached in groups, using a default cache budget of 256 MiB. Within a group, every product is computed once. Each product for a later bin is streamed once and compared with every member of the group. If all products fit in the cache, each is computed only once in total, instead of repeatedly for preceding bins.
+With `'CrossCovariance', true`, graph products T_a = S L_a are cached in groups, using a default cache budget of 256 MiB. Within a group, every product is computed once. Each product for a later bin is streamed once and compared with every member of the group. If all products fit in the cache, each is computed only once in total, instead of repeatedly for preceding bins.
 
 ```matlab
 S = sf2_estimate(xy, X, edges, model, 'CacheMB', 512);
@@ -168,7 +202,7 @@ S = sf2_estimate(xy, X, edges, model, 'CacheMB', 512);
 
 `CacheMB` controls cached products only, not total process memory. The model-shape matrix, one streamed product, pair arrays, sparse Laplacians, and arithmetic temporaries require additional memory. Each cached double-precision product occupies approximately 8*n^2 bytes. At n = 2000, one product occupies 30.5 MiB: the default cache holds eight products. `CacheMB = 0` retains one product, the minimum needed, and reproduces the earlier low-memory traversal. The option is unused by `Method = 'direct'`.
 
-Computing T_a costs O(n nnz(L_a)); each trace is evaluated as `sum(sum(T_a .* T_b.'))`, at O(n^2) cost, without dense matrix multiplication. With K occupied bins, the old traversal computed K(K+1)/2 products. A cache that holds all K requires only K products; a smaller cache incurs some recomputation. All cross-bin traces must still be evaluated, so overall runtime need not improve by the same factor as the sparse-product count. The trace method generally benefits when retained pairs greatly outnumber observations, but still requires dense observation-level storage. Pair enumeration itself remains O(n_valid^2), where n_valid is the number of nonmissing observations.
+Computing T_a costs O(n nnz(L_a)); each trace is evaluated as `sum(sum(T_a .* T_b.'))`, at O(n^2) cost, without dense matrix multiplication. With K occupied bins, the old traversal computed K(K+1)/2 products. A cache that holds all K requires only K products; a smaller cache incurs some recomputation. All cross-bin traces must still be evaluated, so overall runtime need not improve by the same factor as the sparse-product count. The trace method generally benefits when retained pairs greatly outnumber observations, but still requires dense observation-level storage. Pair generation examines O(n_valid^2) candidate distances, where n_valid is the number of nonmissing observations; grouping vector-bin labels also incurs per-chunk sorting work.
 
 The original pair-block implementation is retained as an independent verification option:
 
@@ -178,9 +212,5 @@ Scheck = sf2_estimate(xy, X, edges, model, ...
 ```
 
 For `Method = 'direct'`, temporary covariance memory scales as `BlockSize^2`, and runtime remains O(M^2). `BlockSize` is unused by the default trace method. No thinning or covariance truncation occurs in either method. `CrossCovariance = false` returns NaN off-diagonal entries; the trace method then skips cross-bin products and traces.
-
-## Validation
-
-`test_sf2` checks both exact algorithms for all three models against an independent incidence-matrix calculation, Monte Carlo population means and covariance, changes of cache capacity, block size, and data amplitude, power-law coordinate-unit invariance, missing observations, empty bins, the single-pair identity, chi-squared quantiles and confidence-level ordering, interval scaling, numeric input classes, missing-data index mapping, unequal bins and edge inclusion, tiny shape amplitudes, and Monte Carlo coverage in the exact single-pair case. Neither MATLAB nor Octave was available in the authoring environment, so these MATLAB tests remain unrun. Independent Python numerical checks validate the covariance algebra and normalization, but do not establish MATLAB runtime correctness.
 
 Reference: Isserlis, L. (1918), On a formula for the product-moment coefficient of any order of a normal frequency distribution in any number of variables, Biometrika, 12, 134–139. https://doi.org/10.1093/biomet/12.1-2.134

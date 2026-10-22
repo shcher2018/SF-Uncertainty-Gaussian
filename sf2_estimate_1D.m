@@ -3,13 +3,17 @@ function out = sf2_estimate_1D(x, X, edges, model, varargin)
 %
 %   S = sf2_estimate_1D(x, X, edges, model)
 %   S = sf2_estimate_1D(..., 'CrossCovariance', false, ...
-%       'ConfidenceLevel', 0.95, 'ReturnPairs', false)
+%       'ConfidenceLevel', 0.95)
 %
 % Inputs match sf2_estimate, except x must be a real, strictly monotone,
 % uniformly spaced coordinate vector. Units match edges and model.ell.
 % X is a real scalar record; NaNs are omitted pairwise without closing gaps.
 % Model shapes: exp/gaussian with ell, or power with 0 < zeta < 2.
-% All pairs in each bin receive equal weight. The final upper edge is included.
+% edges may be an edge vector or m-by-2 [lower, upper] intervals, allowing
+% gaps, overlaps, and arbitrary row order. All pairs in each bin have equal
+% weight. Lower edges are included. Upper edges are excluded except the
+% globally largest upper edge, included in every interval ending there.
+% Overlaps repeat lag-bin memberships and their covariance is retained.
 %
 % Outputs match sf2_estimate: r, D2, D2shape, count, fractionalCovariance,
 % relativeVariance, effectiveDof, covariance, variance, stderr,
@@ -19,13 +23,9 @@ function out = sf2_estimate_1D(x, X, edges, model, varargin)
 % model must likewise be averaged over pairs rather than evaluated only at r.
 %
 % Options
-%   CrossCovariance  Full cross-bin covariance (default true). Set false
-%                    for diagonal variances and pointwise intervals only.
+%   CrossCovariance  Compute cross-bin covariance (default false).
+%                    Off-diagonal entries are NaN when false.
 %   ConfidenceLevel Pointwise chi-squared CI coverage (default 0.95).
-%   ReturnPairs      Materialize diagnostic pairs/pairBin (default false).
-%                    Otherwise these fields are empty, avoiding O(N*J)
-%                    pair storage. Pair ordering may differ from sf2_estimate.
-%   The trace-specific Method, CacheMB, and BlockSize options are not used.
 %
 % Additional outputs: spacing, lags, lagBin, and lagCount describe the grid
 % and contributing integer lags. method is 'regular'.
@@ -35,9 +35,9 @@ function out = sf2_estimate_1D(x, X, edges, model, varargin)
 % of valid start pairs. Complete records use analytic overlap counts; NaNs
 % use zero-padded FFT cross-correlations of the valid-start masks.
 % No periodic wraparound, covariance truncation, or large-N approximation.
-% For J retained lags, cost is O(N*J^2) for complete records and up to
+% For J retained lag-bin memberships, cost is O(N*J^2) for complete records and up to
 % O(N*J^2*log(N)) with missing values. Working memory is O(N), plus O(J)
-% lag metadata and O(number of bins^2) output; ReturnPairs adds O(N*J).
+% lag metadata and O(number of bins^2) output.
 % Wide bins can contain many lags: this is not universally faster than graph.
 %
 % Assumptions and uncertainty interpretation are the same as sf2_estimate:
@@ -68,39 +68,57 @@ tolerance = 1e-8 * dx + 8 * eps(max(abs(x)));
 if any(abs(abs(delta) - dx) > tolerance)
     error('x must be uniformly spaced; use sf2_estimate for irregular sampling.');
 end
-validateattributes(edges, {'numeric'}, ...
-    {'vector', 'real', 'nonnegative', 'finite'});
-edges = full(double(edges(:)));
-nb = numel(edges) - 1;
-if nb < 1 || any(diff(edges) <= 0)
-    error('Edges must increase.');
+[~, binInfo] = sf2_pairs([], edges);
+edges = binInfo.edges;
+binLimits = binInfo.limits;
+includeUpper = binInfo.includeUpper;
+vectorEdges = binInfo.vectorEdges;
+clear binInfo
+nb = size(binLimits, 1);
+if nb == 0
+    error('sf2:InvalidBins', 'Nonempty bins are required for regular 1D estimation.');
 end
 ip = inputParser;
-addParameter(ip, 'CrossCovariance', true);
+addParameter(ip, 'CrossCovariance', false);
 addParameter(ip, 'ConfidenceLevel', 0.95);
-addParameter(ip, 'ReturnPairs', false);
 parse(ip, varargin{:});
 options = ip.Results;
 validateattributes(options.CrossCovariance, {'logical'}, {'scalar'});
-validateattributes(options.ReturnPairs, {'logical'}, {'scalar'});
 validateattributes(options.ConfidenceLevel, {'numeric'}, ...
     {'scalar', 'real', '>', 0, '<', 1, 'finite'});
 options.ConfidenceLevel = double(options.ConfidenceLevel);
 sf2_model(0, model);
 
 %% Aggregate observations by integer lag, then by separation bin.
-lags = (1:n - 1)';
-lagBin = discretize(lags * dx, edges);
-keep = ~isnan(lagBin);
-lags = lags(keep);
-lagBin = lagBin(keep);
+allLags = (1:n - 1)';
+separation = allLags * dx;
+if vectorEdges
+    % Fast disjoint assignment: one discretize call for all integer lags.
+    labels = discretize(separation, edges);
+    keep = ~isnan(labels);
+    lags = allLags(keep);
+    lagBin = labels(keep);
+else
+    % Independent intervals may assign one integer lag to several bins.
+    lagChunks = cell(nb, 1);
+    for b = 1:nb
+        keep = separation >= binLimits(b, 1) ...
+            & (separation < binLimits(b, 2) ...
+            | (includeUpper(b) & separation == binLimits(b, 2)));
+        selected = allLags(keep);
+        lagChunks{b} = [selected, repmat(b, numel(selected), 1)];
+    end
+    membership = vertcat(lagChunks{:});
+    if isempty(membership)
+        membership = zeros(0, 2);
+    end
+    lags = membership(:, 1);
+    lagBin = membership(:, 2);
+end
+clear allLags separation labels keep lagChunks membership selected
 validX = ~isnan(X);
 lagCount = zeros(size(lags));
 lagSum = zeros(size(lags));
-pairChunks = cell(0, 1);
-if options.ReturnPairs
-    pairChunks = cell(numel(lags), 1);
-end
 for a = 1:numel(lags)
     p = lags(a);
     starts = (1:n - p)';
@@ -108,27 +126,13 @@ for a = 1:numel(lags)
     starts = starts(good);
     lagCount(a) = numel(starts);
     lagSum(a) = sum((X(starts + p) - X(starts)).^2);
-    if options.ReturnPairs
-        pairChunks{a} = [starts, starts + p, repmat(lagBin(a), numel(starts), 1)];
-    end
 end
-% Zero-count lags contribute nothing, including when all data are missing.
+% Zero-count lag memberships contribute nothing to any bin statistics.
 keep = lagCount > 0;
 lags = lags(keep);
 lagBin = lagBin(keep);
 lagCount = lagCount(keep);
 lagSum = lagSum(keep);
-if options.ReturnPairs && ~isempty(pairChunks)
-    pp = vertcat(pairChunks{:});
-else
-    pp = zeros(0, 3);
-end
-if isempty(pp)
-    pp = zeros(0, 3);
-end
-pairs = pp(:, 1:2);
-pairBin = pp(:, 3);
-clear pp pairChunks
 count = zeros(nb, 1);
 D2 = nan(nb, 1);
 D2shape = nan(nb, 1);
@@ -235,6 +239,6 @@ out = struct('edges', edges, 'r', r, 'D2', D2, 'D2shape', D2shape, ...
     'variance', variance, 'stderr', sqrt(variance), ...
     'confidenceInterval', confidenceInterval, ...
     'confidenceLevel', options.ConfidenceLevel, 'count', count, ...
-    'pairs', pairs, 'pairBin', pairBin, 'model', model, 'method', 'regular', ...
+    'model', model, 'method', 'regular', ...
     'spacing', dx, 'lags', lags, 'lagBin', lagBin, 'lagCount', lagCount);
 end
